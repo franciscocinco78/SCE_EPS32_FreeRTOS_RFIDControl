@@ -9,17 +9,22 @@ ESP32 Modules/functionalities:
 
 -EUSART
 
-+I/O ports
+-I/O ports
 
-+ADC/DAC
+-ADC/DAC
 
-+PWM
+-PWM
 
-+I2C/SPI
+-I2C/SPI
 
 FreeRTOS:
-*Tasks
-*Message Queue
-*Semaphore
-*Interrupt Management
-*Task Deletion
+
+-Tasks
+
+-Message Queue
+
+-Semaphore
+
+-Interrupt Management
+
+-Task Deletion
