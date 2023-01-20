@@ -6,7 +6,8 @@ The project had some requirements, which can be divided in ESP32 modules/functio
 Below ae the functionalities used.
 
 ESP32 Modules/functionalities:
-+EUSART
+
+-EUSART
 
 +I/O ports
 
