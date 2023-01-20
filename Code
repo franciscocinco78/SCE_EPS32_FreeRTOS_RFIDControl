@@ -1,3 +1,21 @@
+/*Nome ALUNO A- Francisco Bernardo Mota Ferreira
+Nome ALUNO B- Pedro Miguel Antunes Carvalho
+IPLEIRIA - Instituto Politécnico de Leiria
+ESTG - Escola Superior de Tecnologia e Gestão
+LEEC- Licenciatura em Engenharia Eletrotécnica e de Computadores
+
+
+
+TP1: Pretende-se  neste  trabalho  prático  a  implementação  de 
+sistema de leitura de tags RFID e  visualização da sua identicação
+num display TFT, gravação num cartão de memoria e atuação de um sinal 
+luminoso e sonoro quando é gravado.
+
+youtube: https://youtu.be/rRAHAmo0UqQ
+*/
+
+
+
 #include "Arduino.h"
 #include <stdio.h>
 #include <string.h>
