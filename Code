@@ -1,0 +1,480 @@
+#include "Arduino.h"
+#include <stdio.h>
+#include <string.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_system.h"
+#include "nvs_flash.h"
+#include "esp_task_wdt.h"
+#include "RFID_command.h"
+#include "SPI.h"
+#include "TFT_22_ILI9225.h"
+#include "FS.h"
+#include "SD.h"
+#include "SPI.h"
+#include "ESP32Time.h"
+
+
+UHF_RFID RFID;
+#define RXD2 16
+#define TXD2 17
+#define TFT_RST 26  // IO 26
+#define TFT_RS  25  // IO 25
+#define TFT_CLK 14  // HSPI-SCK
+//#define TFT_SDO 12  // HSPI-MISO
+#define TFT_SDI 13  // HSPI-MOSI
+#define TFT_CS  15  // HSPI-SS0
+#define TFT_LED 0   // 0 if wired to +5V directly
+SPIClass hspi(HSPI);
+#define TFT_BRIGHTNESS 200 // Initial brightness of TFT backlight (optional)
+TFT_22_ILI9225 tft = TFT_22_ILI9225(TFT_RST, TFT_RS, TFT_CS, TFT_LED, TFT_BRIGHTNESS);
+int led =21;
+String comd = " ";
+CardpropertiesInfo card;
+ManyInfo cards;
+SelectInfo Select;
+CardInformationInfo Cardinformation;
+QueryInfo Query;
+ReadInfo Read;
+TestInfo Test;
+uint16_t x, y;
+boolean flag = false;
+
+ESP32Time rtc(3600);
+/* The task functions. */
+void vTaskRFID( void *pvParameters );
+void vTaskTFT( void *pvParameters );
+void vTaskWRITESD( void *pvParameters );
+void vTaskBUZZER( void *pvParameters );
+
+
+
+static void IRAM_ATTR vExampleInterruptHandler(void);
+
+/*-----------------------------------------------------------*/
+const char *pcTextForRFID = "RFID is running\r\n";
+const char *pcTextForTFT = "TFT is running\t\n";
+const char *pcTextForWRITESD = "Write to sd card is running\t\n";
+const char *pcTextForBuzz = "Buzzer is running\t\n";
+
+QueueHandle_t xQueueEPC;
+QueueHandle_t xQueueSD;
+QueueHandle_t xQueueSD2;
+
+
+SemaphoreHandle_t xBinarySemaphore;
+
+const uint8_t interruptPin = 0;
+void listDir(fs::FS &fs, const char * dirname, uint8_t levels){
+    Serial.printf("Listing directory: %s\n", dirname);
+
+    File root = fs.open(dirname);
+    if(!root){
+        Serial.println("Failed to open directory");
+        return;
+    }
+    if(!root.isDirectory()){
+        Serial.println("Not a directory");
+        return;
+    }
+
+    File file = root.openNextFile();
+    while(file){
+        if(file.isDirectory()){
+            Serial.print("  DIR : ");
+            Serial.println(file.name());
+            if(levels){
+                listDir(fs, file.name(), levels -1);
+            }
+        } else {
+            Serial.print("  FILE: ");
+            Serial.print(file.name());
+            Serial.print("  SIZE: ");
+            Serial.println(file.size());
+        }
+        file = root.openNextFile();
+    }
+}
+void createDir(fs::FS &fs, const char * path){
+    Serial.printf("Creating Dir: %s\n", path);
+    if(fs.mkdir(path)){
+        Serial.println("Dir created");
+    } else {
+        Serial.println("mkdir failed");
+    }
+}
+void removeDir(fs::FS &fs, const char * path){
+    Serial.printf("Removing Dir: %s\n", path);
+    if(fs.rmdir(path)){
+        Serial.println("Dir removed");
+    } else {
+        Serial.println("rmdir failed");
+    }
+}
+void readFile(fs::FS &fs, const char * path){
+    Serial.printf("Reading file: %s\n", path);
+
+    File file = fs.open(path);
+    if(!file){
+        Serial.println("Failed to open file for reading");
+        return;
+    }
+
+    Serial.print("Read from file: ");
+    while(file.available()){
+        Serial.write(file.read());
+    }
+    file.close();
+}
+void writeFile(fs::FS &fs, const char * path, const char * message){
+    Serial.printf("Writing file: %s\n", path);
+
+    File file = fs.open(path, FILE_WRITE);
+    if(!file){
+        Serial.println("Failed to open file for writing");
+        return;
+    }
+    if(file.print(message)){
+        Serial.println("File written");
+    } else {
+        Serial.println("Write failed");
+    }
+    file.close();
+}
+void appendFile(fs::FS &fs, const char * path, const char * message){
+    Serial.printf("Appending to file: %s\n", path);
+
+    File file = fs.open(path, FILE_APPEND);
+    if(!file){
+        Serial.println("Failed to open file for appending");
+        return;
+    }
+    if(file.print(message)){
+        Serial.println("Message appended");
+    } else {
+        Serial.println("Append failed");
+    }
+    file.close();
+}
+void renameFile(fs::FS &fs, const char * path1, const char * path2){
+    Serial.printf("Renaming file %s to %s\n", path1, path2);
+    if (fs.rename(path1, path2)) {
+        Serial.println("File renamed");
+    } else {
+        Serial.println("Rename failed");
+    }
+}
+void deleteFile(fs::FS &fs, const char * path){
+    Serial.printf("Deleting file: %s\n", path);
+    if(fs.remove(path)){
+        Serial.println("File deleted");
+    } else {
+        Serial.println("Delete failed");
+    }
+}
+void testFileIO(fs::FS &fs, const char * path){
+    File file = fs.open(path);
+    static uint8_t buf[512];
+    size_t len = 0;
+    uint32_t start = millis();
+    uint32_t end = start;
+    if(file){
+        len = file.size();
+        size_t flen = len;
+        start = millis();
+        while(len){
+            size_t toRead = len;
+            if(toRead > 512){
+                toRead = 512;
+            }
+            file.read(buf, toRead);
+            len -= toRead;
+        }
+        end = millis() - start;
+        Serial.printf("%u bytes read for %u ms\n", flen, end);
+        file.close();
+    } else {
+        Serial.println("Failed to open file for reading");
+    }
+
+
+    file = fs.open(path, FILE_WRITE);
+    if(!file){
+        Serial.println("Failed to open file for writing");
+        return;
+    }
+
+    size_t i;
+    start = millis();
+    for(i=0; i<2048; i++){
+        file.write(buf, 512);
+    }
+    end = millis() - start;
+    Serial.printf("%u bytes written for %u ms\n", 2048 * 512, end);
+    file.close();
+}
+void setup( void )
+{
+  // Set loopTask max priority before deletion
+  vTaskPrioritySet(NULL, configMAX_PRIORITIES-1);
+
+  // Init USART and set Baud-rate to 115200
+  Serial.begin(115200);
+  Serial2.begin(115200);
+  hspi.begin();
+  tft.begin(hspi);
+
+
+  /* Start the scheduler so our tasks start executing. */
+  //vTaskStartScheduler();
+  xQueueEPC= xQueueCreate( 1, sizeof(String));
+  xQueueSD= xQueueCreate( 1, sizeof(int));
+  xQueueSD2= xQueueCreate( 1, sizeof(int));
+  /* If all is well we will never reach here as the scheduler will now be
+  running.  If we do reach here then it is likely that there was insufficient
+  heap available for the idle task to be created. */
+//  for( ;; );
+//  return 0;
+  vSemaphoreCreateBinary(xBinarySemaphore);
+
+  pinMode(interruptPin, OUTPUT);
+  attachInterrupt(digitalPinToInterrupt(interruptPin), &vExampleInterruptHandler, FALLING);
+  if (xBinarySemaphore != NULL){
+	  /* Create one of the two tasks. */
+	     xTaskCreatePinnedToCore(  vTaskRFID, "Task 1", 1024,(void*)pcTextForRFID,2,NULL,1);
+
+	     /* Create the other task in exactly the same way. */
+
+	     xTaskCreatePinnedToCore( vTaskTFT, "Task 2", 1024,(void*)pcTextForTFT, 1, NULL, 1);
+
+	     xTaskCreatePinnedToCore(vTaskWRITESD, "Task 3", 2500, (void*)pcTextForWRITESD,1,NULL,0);
+	     xTaskCreatePinnedToCore(vTaskBUZZER, "Task 4", 1024, (void*)pcTextForBuzz,1,NULL,0);
+
+  }
+  if(!SD.begin()){
+	  Serial.println("Card Mount Failed");
+	  return;
+  }
+  uint8_t cardType = SD.cardType();
+  if(cardType == CARD_NONE){
+	  Serial.println("MMC");
+  } else if(cardType == CARD_SD){
+	  Serial.println("SDSC");
+  } else if (cardType == CARD_SDHC){
+	  Serial.println("SDHC");
+  } else {
+	  Serial.println("UNKNOWN");
+  }
+  uint64_t cardSize = SD.cardSize() / (1024 * 1024);
+  writeFile(SD, "/EPC.txt", "IDs das tags ");
+  pinMode(2, OUTPUT);
+  ledcSetup(1, 2000, 8);
+  ledcAttachPin(21, 1);
+  rtc.setTime(30, 52, 16, 18, 1, 2023);
+
+}
+/*-----------------------------------------------------------*/
+
+void vTaskRFID( void *pvParameters ){
+	char *pcTaskName;
+	TickType_t xLastWakeTime;
+	String lEPCSEND;
+
+	pcTaskName = (char*) pvParameters;
+	xLastWakeTime = xTaskGetTickCount();
+	  /* As per most tasks, this task is implemented in an infinite loop. */
+		for (;;){
+			Serial.print(pcTaskName);
+			card = RFID.A_single_poll_of_instructions();
+			if (card._ERROR.length() != 0) {
+				//Serial.println(card._ERROR);
+			} else {
+				if (card._EPC.length() == 24) {
+
+					//Serial.println("EPC :" + card._EPC);
+					lEPCSEND=card._EPC;
+					xQueueSendToBack( xQueueEPC, &lEPCSEND, 0 );
+			//        tft.setOrientation(1);
+			//        tft.setFont(Terminal6x8);
+			//        tft.drawText(10, 20, "1.EPC:" + card._EPC); // max 160
+					digitalWrite(interruptPin, LOW);
+					digitalWrite(interruptPin, HIGH);
+					vTaskDelayUntil(&xLastWakeTime, (250 / portTICK_PERIOD_MS));
+				}
+			}
+			if (touchRead(33)<30){
+				tft.clear();
+			}
+			RFID.clean_data();
+		}
+
+}
+
+
+
+
+  /* As per most tasks, this task is implemented in an infinite loop. */
+
+/*-----------------------------------------------------------*/
+
+void vTaskTFT( void *pvParameters )
+{
+	char *pcTaskName;
+	TickType_t xLastWakeTime;
+    String lEPCReceived;
+    String epc="";
+    const TickType_t xTicksToWait = 100 / portTICK_PERIOD_MS;
+    static portBASE_TYPE run;
+
+	pcTaskName = (char*) pvParameters;
+    xLastWakeTime = xTaskGetTickCount();
+
+	  /* As per most tasks, this task is implemented in an infinite loop. */
+		for (;;){
+			run = xSemaphoreTake(xBinarySemaphore, portMAX_DELAY);
+			if(run==pdPASS){
+
+
+				Serial.println(pcTaskName);
+				xQueueReceive( xQueueEPC, &lEPCReceived, xTicksToWait);
+				epc=lEPCReceived;
+				tft.setOrientation(3);
+				tft.setFont(Terminal6x8);
+				tft.drawText(10, 20, "1.EPC:" + epc); // max 160
+
+				vTaskDelayUntil(&xLastWakeTime, ((250/4) / portTICK_PERIOD_MS));
+			}
+			}
+
+}
+void vTaskWRITESD( void *pvParameters ){
+	char *pcTaskName;
+		TickType_t xLastWakeTime;
+	    String lEPCReceived;
+	    int lSDSEND;
+	    int lSD2RECEIVED;
+	    String epc="";
+	    int i=0;
+	    const TickType_t xTicksToWait = 100 / portTICK_PERIOD_MS;
+	    static portBASE_TYPE run;
+	    String epcc=" EPC:";
+	    String line="\n\r";
+	    String epcc2="";
+		pcTaskName = (char*) pvParameters;
+	    xLastWakeTime = xTaskGetTickCount();
+
+		  /* As per most tasks, this task is implemented in an infinite loop. */
+			for (;;){
+				run = xSemaphoreTake(xBinarySemaphore, portMAX_DELAY);
+				if (run==pdPASS && touchRead(4)<20){
+
+					xQueueReceive( xQueueSD2, &lSD2RECEIVED, xTicksToWait);
+					lSDSEND=lSD2RECEIVED;
+
+					Serial.println(pcTaskName);
+					xQueueReceive( xQueueEPC, &lEPCReceived, xTicksToWait);
+					epc=lEPCReceived;
+
+
+					epcc2=line+i+epcc+epc+line;
+					Serial.println(epcc2);
+
+					readFile(SD, "/EPC.txt");
+					appendFile(SD, "/EPC.txt", epcc2.c_str());
+					lSDSEND=1;
+
+					xQueueSendToBack( xQueueSD, &lSDSEND, 0 );
+
+						//epcc2.c_str();
+					i++;
+
+
+
+
+
+
+		        vTaskDelayUntil(&xLastWakeTime, ((250) / portTICK_PERIOD_MS));
+			}
+
+}
+}
+void vTaskBUZZER( void *pvParameters ){
+	char *pcTaskName;
+		TickType_t xLastWakeTime;
+	    //String lEPCReceived;
+	    int lSDRECEIVED;
+	    int lSD2SEND;
+	    int brightness = 0;    // how bright the LED is
+	    int fadeAmount = 5;
+	    //String epc="";
+	    //int i=0;
+	    const TickType_t xTicksToWait = 100 / portTICK_PERIOD_MS;
+	    static portBASE_TYPE run;
+	    //String epcc="EPC:";
+	    //String line="\n\r";
+	    //String epcc2="";
+	    int sd_c,j;
+		pcTaskName = (char*) pvParameters;
+	    xLastWakeTime = xTaskGetTickCount();
+		Serial.println(pcTaskName);
+
+		  /* As per most tasks, this task is implemented in an infinite loop. */
+			for (;;){
+				run = xSemaphoreTake(xBinarySemaphore, portMAX_DELAY);
+				if (run==pdPASS){
+					xQueueReceive( xQueueSD, &lSDRECEIVED, xTicksToWait);
+						sd_c=lSDRECEIVED;
+						Serial.println(sd_c);
+						if (sd_c==1 && touchRead(4)<20){
+							for(j=0;j<200;j++){
+							  digitalWrite(2,HIGH);// sound
+							  ledcWrite(1, j);
+							  vTaskDelay( 1 / portTICK_PERIOD_MS );
+							  digitalWrite(2,LOW);//not sound
+							  vTaskDelay( 1 / portTICK_PERIOD_MS );
+
+						}
+							lSD2SEND=0;
+							xQueueSendToBack( xQueueSD2, &lSD2SEND, 0 );
+							ledcWrite(1, 0);
+
+					}
+				}
+
+
+
+
+		        vTaskDelayUntil(&xLastWakeTime, ((250) / portTICK_PERIOD_MS));
+			}
+
+}
+
+static void  IRAM_ATTR  vExampleInterruptHandler( void )
+{
+static signed portBASE_TYPE xHigherPriorityTaskWoken;
+
+  xHigherPriorityTaskWoken = pdFALSE;
+  Serial.println("ocorreu uma interrupcao");
+
+  /* 'Give' the semaphore to unblock the task. */
+  xSemaphoreGiveFromISR( xBinarySemaphore, (signed portBASE_TYPE*)&xHigherPriorityTaskWoken );
+
+  if( xHigherPriorityTaskWoken == pdTRUE )
+  {
+    /* Giving the semaphore unblocked a task, and the priority of the
+    unblocked task is higher than the currently running task - force
+    a context switch to ensure that the interrupt returns directly to
+    the unblocked (higher priority) task.
+
+    NOTE: The syntax for forcing a context switch is different depending
+    on the port being used.  Refer to the examples for the port you are
+    using for the correct method to use! */
+    portYIELD_FROM_ISR();
+//    vPortYield();
+  }
+}
+//
+
+void loop() {
+	vTaskDelete(NULL);
+}
